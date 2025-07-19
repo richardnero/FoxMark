@@ -4,7 +4,9 @@ Editor Modes
 Manages switching between Markdown and WYSIWYG modes
 """
 
+import re
 from enum import Enum
+from typing import List
 from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *

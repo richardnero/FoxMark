@@ -7,9 +7,6 @@ Markdown editor and preview with perfect bidirectional sync
 import os
 import re
 from typing import List
-import os
-import re
-from typing import List
 from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *
@@ -44,6 +41,10 @@ class MarkdownSyntaxHighlighter(QSyntaxHighlighter):
         frontmatter_format.setBackground(QColor('#2d1b69'))
         self.highlighting_rules.append((QRegularExpression(r'^---.*'), frontmatter_format))
         
+        # Headers (H1-H6)
+        header_format = QTextCharFormat()
+        header_format.setForeground(self.colors['header'])
+        header_format.setFontWeight(QFont.Bold)
         # Enhanced syntax highlighting with H4-H6 support
         self.highlighting_rules.append((QRegularExpression(r'^#{1,6}\s.*'), header_format))
         
@@ -187,10 +188,6 @@ class MarkdownEditor(QTextEdit):
             cursor = self.textCursor()
             line_number = cursor.blockNumber()
             self.cursor_position_changed.emit(line_number)
-    
-    def on_scroll_changed(self):
-        # This method is now handled by throttled version
-        pass
     
     def goto_line(self, line_number: int):
         """Jump to specific line number - FIXED"""
@@ -493,7 +490,7 @@ class MarkdownPreview(QWebEngineView):
             # Convert markdown to HTML
             html_content = self.markdown_processor.convert(markdown_text)
             
-            # Create optimized HTML
+            # Create optimized HTML with safer contentEditable handling
             full_html = f"""
             <!DOCTYPE html>
             <html>
@@ -505,11 +502,19 @@ class MarkdownPreview(QWebEngineView):
                 </style>
             </head>
             <body>
-                <div class="markdown-body" contenteditable="true" id="content">
+                <div class="markdown-body" id="content">
                     {html_content}
                 </div>
                 <script>
-                    {self.get_optimized_preview_js()}
+                    // Wait for DOM to be ready before setting up
+                    document.addEventListener('DOMContentLoaded', function() {{
+                        {self.get_optimized_preview_js()}
+                    }});
+                    
+                    // Also run immediately in case DOM is already loaded
+                    if (document.readyState === 'complete') {{
+                        {self.get_optimized_preview_js()}
+                    }}
                 </script>
             </body>
             </html>
@@ -723,147 +728,168 @@ class MarkdownPreview(QWebEngineView):
     
     def get_optimized_preview_js(self):
         return """
-        var bridge;
-        var isContentChanging = false;
-        var isScrollSyncing = false;
-        var scrollDebounceTimeout;
-        var contentDebounceTimeout;
-        
-        new QWebChannel(qt.webChannelTransport, function(channel) {
-            bridge = channel.objects.bridge;
+        // Ensure we don't run multiple times
+        if (window.foxmarkInitialized) {
+            // Just exit, don't return (since we're not in a function)
+            console.log('FoxMark already initialized');
+        } else {
+            window.foxmarkInitialized = true;
             
-            var content = document.getElementById('content');
-            if (!content) return;
+            var bridge;
+            var isContentChanging = false;
+            var isScrollSyncing = false;
+            var scrollDebounceTimeout;
+            var contentDebounceTimeout;
             
-            // Optimized scroll synchronization with 60fps throttling
-            var lastScrollTime = 0;
-            window.addEventListener('scroll', function() {
-                if (isScrollSyncing) return;
-                
-                var now = performance.now();
-                if (now - lastScrollTime < 16) return; // 60fps throttling
-                lastScrollTime = now;
-                
-                clearTimeout(scrollDebounceTimeout);
-                scrollDebounceTimeout = setTimeout(function() {
-                    var scrollTop = window.pageYOffset || document.documentElement.scrollTop;
-                    var scrollHeight = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
-                    var ratio = scrollHeight > 0 ? scrollTop / scrollHeight : 0;
-                    
-                    if (bridge && bridge.on_scroll_changed) {
-                        bridge.on_scroll_changed(ratio);
-                    }
-                }, 8); // Very fast response
-            });
-            
-            // Optimized content editing with reduced debounce
-            var lastInputTime = 0;
-            content.addEventListener('input', function(e) {
-                if (isContentChanging) return;
-                
-                var now = performance.now();
-                lastInputTime = now;
-                
-                clearTimeout(contentDebounceTimeout);
-                contentDebounceTimeout = setTimeout(function() {
-                    // Only process if this is the latest input
-                    if (performance.now() - lastInputTime < 100) {
-                        var htmlContent = content.innerHTML;
-                        
-                        if (bridge && bridge.on_content_changed) {
-                            bridge.on_content_changed(htmlContent);
-                        }
-                    }
-                }, 150); // Reduced from 300ms
-            });
-            
-            // Improved paste handling
-            content.addEventListener('paste', function(e) {
-                e.preventDefault();
-                var text = (e.originalEvent || e).clipboardData.getData('text/plain');
-                
-                // Insert as plain text
-                var selection = window.getSelection();
-                if (selection.rangeCount) {
-                    var range = selection.getRangeAt(0);
-                    range.deleteContents();
-                    
-                    // Split by lines and insert properly
-                    var lines = text.split('\\n');
-                    for (var i = 0; i < lines.length; i++) {
-                        if (i > 0) {
-                            range.insertNode(document.createElement('br'));
-                        }
-                        range.insertNode(document.createTextNode(lines[i]));
-                        range.collapse(false);
-                    }
-                    
-                    selection.removeAllRanges();
-                    selection.addRange(range);
+            function initializeFoxMark() {
+                var content = document.getElementById('content');
+                if (!content) {
+                    // If content doesn't exist yet, try again in a moment
+                    setTimeout(initializeFoxMark, 100);
+                    return;
                 }
                 
-                // Immediate content change notification
-                setTimeout(function() {
-                    content.dispatchEvent(new Event('input'));
-                }, 50);
-            });
-            
-            // Fast cursor position tracking
-            var cursorDebounceTimeout;
-            document.addEventListener('selectionchange', function() {
-                clearTimeout(cursorDebounceTimeout);
-                cursorDebounceTimeout = setTimeout(function() {
-                    var selection = window.getSelection();
-                    if (selection.rangeCount > 0) {
-                        var range = selection.getRangeAt(0);
-                        var element = range.startContainer.nodeType === Node.TEXT_NODE 
-                            ? range.startContainer.parentNode 
-                            : range.startContainer;
-                        
-                        var allElements = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li'));
-                        var lineNumber = allElements.indexOf(element);
-                        
-                        if (lineNumber >= 0 && bridge && bridge.on_cursor_changed) {
-                            bridge.on_cursor_changed(lineNumber);
-                        }
-                    }
-                }, 25); // Faster cursor tracking
-            });
-            
-            // Prevent drag and drop
-            ['dragover', 'drop'].forEach(function(eventName) {
-                content.addEventListener(eventName, function(e) {
-                    e.preventDefault();
-                });
-            });
-            
-            // Enhanced table editing
-            function makeTablesEditable() {
-                var cells = document.querySelectorAll('table td, table th');
-                cells.forEach(function(cell) {
-                    cell.setAttribute('contenteditable', 'true');
-                    cell.style.outline = 'none';
-                });
+                // Set initial contentEditable state
+                content.contentEditable = 'false'; // Start in read-only mode
             }
             
-            // Initial setup and re-setup after content changes
-            makeTablesEditable();
-            var observer = new MutationObserver(function() {
-                setTimeout(makeTablesEditable, 10);
+            new QWebChannel(qt.webChannelTransport, function(channel) {
+                bridge = channel.objects.bridge;
+                initializeFoxMark();
+                
+                var content = document.getElementById('content');
+                if (!content) return;
+                
+                // Optimized scroll synchronization with 60fps throttling
+                var lastScrollTime = 0;
+                window.addEventListener('scroll', function() {
+                    if (isScrollSyncing) return;
+                    
+                    var now = performance.now();
+                    if (now - lastScrollTime < 16) return; // 60fps throttling
+                    lastScrollTime = now;
+                    
+                    clearTimeout(scrollDebounceTimeout);
+                    scrollDebounceTimeout = setTimeout(function() {
+                        var scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+                        var scrollHeight = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+                        var ratio = scrollHeight > 0 ? scrollTop / scrollHeight : 0;
+                        
+                        if (bridge && bridge.on_scroll_changed) {
+                            bridge.on_scroll_changed(ratio);
+                        }
+                    }, 8); // Very fast response
+                });
+                
+                // Optimized content editing with reduced debounce
+                var lastInputTime = 0;
+                content.addEventListener('input', function(e) {
+                    if (isContentChanging) return;
+                    
+                    var now = performance.now();
+                    lastInputTime = now;
+                    
+                    clearTimeout(contentDebounceTimeout);
+                    contentDebounceTimeout = setTimeout(function() {
+                        // Only process if this is the latest input
+                        if (performance.now() - lastInputTime < 100) {
+                            var htmlContent = content.innerHTML;
+                            
+                            if (bridge && bridge.on_content_changed) {
+                                bridge.on_content_changed(htmlContent);
+                            }
+                        }
+                    }, 150); // Reduced from 300ms
+                });
+                
+                // Improved paste handling
+                content.addEventListener('paste', function(e) {
+                    e.preventDefault();
+                    var text = (e.originalEvent || e).clipboardData.getData('text/plain');
+                    
+                    // Insert as plain text
+                    var selection = window.getSelection();
+                    if (selection.rangeCount) {
+                        var range = selection.getRangeAt(0);
+                        range.deleteContents();
+                        
+                        // Split by lines and insert properly
+                        var lines = text.split('\\n');
+                        for (var i = 0; i < lines.length; i++) {
+                            if (i > 0) {
+                                range.insertNode(document.createElement('br'));
+                            }
+                            range.insertNode(document.createTextNode(lines[i]));
+                            range.collapse(false);
+                        }
+                        
+                        selection.removeAllRanges();
+                        selection.addRange(range);
+                    }
+                    
+                    // Immediate content change notification
+                    setTimeout(function() {
+                        content.dispatchEvent(new Event('input'));
+                    }, 50);
+                });
+                
+                // Fast cursor position tracking
+                var cursorDebounceTimeout;
+                document.addEventListener('selectionchange', function() {
+                    clearTimeout(cursorDebounceTimeout);
+                    cursorDebounceTimeout = setTimeout(function() {
+                        var selection = window.getSelection();
+                        if (selection.rangeCount > 0) {
+                            var range = selection.getRangeAt(0);
+                            var element = range.startContainer.nodeType === Node.TEXT_NODE 
+                                ? range.startContainer.parentNode 
+                                : range.startContainer;
+                            
+                            var allElements = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li'));
+                            var lineNumber = allElements.indexOf(element);
+                            
+                            if (lineNumber >= 0 && bridge && bridge.on_cursor_changed) {
+                                bridge.on_cursor_changed(lineNumber);
+                            }
+                        }
+                    }, 25); // Faster cursor tracking
+                });
+                
+                // Prevent drag and drop
+                ['dragover', 'drop'].forEach(function(eventName) {
+                    content.addEventListener(eventName, function(e) {
+                        e.preventDefault();
+                    });
+                });
+                
+                // Enhanced table editing
+                function makeTablesEditable() {
+                    var cells = document.querySelectorAll('table td, table th');
+                    cells.forEach(function(cell) {
+                        cell.setAttribute('contenteditable', 'true');
+                        cell.style.outline = 'none';
+                    });
+                }
+                
+                // Initial setup and re-setup after content changes
+                makeTablesEditable();
+                var observer = new MutationObserver(function() {
+                    setTimeout(makeTablesEditable, 10);
+                });
+                observer.observe(content, { childList: true, subtree: true });
             });
-            observer.observe(content, { childList: true, subtree: true });
-        });
-        
-        // Global sync state management
-        function setSyncState(syncing) {
-            isContentChanging = syncing;
-            isScrollSyncing = syncing;
+            
+            // Global sync state management
+            function setSyncState(syncing) {
+                isContentChanging = syncing;
+                isScrollSyncing = syncing;
+            }
+            
+            window.setSyncState = setSyncState;
+            
+            // Performance optimization
+            window.requestIdleCallback = window.requestIdleCallback || function(cb) {
+                return setTimeout(cb, 1);
+            };
         }
-        
-        window.setSyncState = setSyncState;
-        
-        // Performance optimization
-        window.requestIdleCallback = window.requestIdleCallback || function(cb) {
-            return setTimeout(cb, 1);
-        };
         """
